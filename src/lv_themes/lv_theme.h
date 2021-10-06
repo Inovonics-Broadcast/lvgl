@@ -96,6 +96,9 @@ typedef enum {
 #if LV_USE_LINEMETER
     LV_THEME_LINEMETER,
 #endif
+#if LV_USE_LINEARSCALE
+    LV_THEME_LINEARSCALE,
+#endif
 #if LV_USE_MSGBOX
     LV_THEME_MSGBOX,
     LV_THEME_MSGBOX_BTNS,   /*The button matrix of the buttons are initialized separately*/
