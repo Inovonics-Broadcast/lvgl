@@ -709,6 +709,7 @@ static lv_design_res_t lv_btnmatrix_design(lv_obj_t * btnm, const lv_area_t * cl
             lv_state_t btn_state = LV_STATE_DEFAULT;
             if(button_get_tgl_state(ext->ctrl_bits[btn_i])) btn_state |= LV_STATE_CHECKED;
             if(button_is_inactive(ext->ctrl_bits[btn_i])) btn_state |= LV_STATE_DISABLED;
+            if(lv_obj_get_state(btnm, LV_OBJ_PART_MAIN) & LV_STATE_DISABLED) btn_state |= LV_STATE_DISABLED;
             if(btn_i == ext->btn_id_pr) btn_state |= LV_STATE_PRESSED;
             if(btn_i == ext->btn_id_focused) {
                 btn_state |= LV_STATE_FOCUSED;
