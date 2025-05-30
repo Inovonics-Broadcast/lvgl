@@ -262,7 +262,11 @@ void lv_dropdown_add_option(lv_obj_t * obj, const char * option, uint32_t pos)
     /*Convert static options to dynamic*/
     if(dropdown->static_txt != 0) {
         char * static_options = dropdown->options;
-        dropdown->options = lv_strdup(static_options);
+        if (dropdown->options) {
+            dropdown->options = lv_strdup(static_options);
+        } else {
+            dropdown->options = lv_calloc(1); /*Allocate 1 byte for the NULL terminator*/
+        }
         LV_ASSERT_MALLOC(dropdown->options);
         if(dropdown->options == NULL) return;
         dropdown->static_txt = 0;
