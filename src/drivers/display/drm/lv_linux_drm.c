@@ -75,6 +75,11 @@ typedef struct {
     drmModePropertyPtr conn_props[128];
     drm_buffer_t drm_bufs[BUFFER_CNT];
     drm_buffer_t * act_buf;
+    /* Software rotation support: LVGL renders into `lvgl_buf` (sized to the logical/rotated
+     * resolution) and drm_flush() rotates it into whichever physical dumb buffer is idle. */
+    lv_display_rotation_t rotation;
+    uint8_t * lvgl_buf;
+    uint32_t next_buf_idx;
 #if LV_USE_LINUX_DRM_GBM_BUFFERS
     struct gbm_device * gbm_device;
 #endif
@@ -226,21 +231,44 @@ lv_result_t lv_linux_drm_set_file(lv_display_t * disp, const char * file, int64_
 
     int32_t width = drm_dev->mmWidth;
 
-    size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
-    uint32_t stride = drm_dev->drm_bufs[0].pitch;
     /* Resolution must be set first because if the screen is smaller than the size passed
      * to lv_display_create then the buffers aren't big enough for LV_DISPLAY_RENDER_MODE_DIRECT.
      */
     lv_display_set_resolution(disp, hor_res, ver_res);
-    lv_display_set_buffers_with_stride(disp, drm_dev->drm_bufs[1].map, drm_dev->drm_bufs[0].map, buf_size,
-                                       stride, LV_DISPLAY_RENDER_MODE_DIRECT);
 
+    drm_dev->rotation = lv_display_get_rotation(disp);
 
-    /* Set the handler that is called before a redraw occurs to set the active buffer/plane
-     * when GBM buffers are used the DMA_BUF_SYNC_START is issued there */
-    lv_display_add_event_cb(disp, drm_dmabuf_set_active_buf, LV_EVENT_REFR_START, drm_dev);
+    if(drm_dev->rotation == LV_DISPLAY_ROTATION_0) {
+        size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
+        uint32_t stride = drm_dev->drm_bufs[0].pitch;
+        lv_display_set_buffers_with_stride(disp, drm_dev->drm_bufs[1].map, drm_dev->drm_bufs[0].map,
+                                           buf_size, stride, LV_DISPLAY_RENDER_MODE_DIRECT);
 
-    if(width) {
+        /* Set the handler that is called before a redraw occurs to set the active buffer/plane
+         * when GBM buffers are used the DMA_BUF_SYNC_START is issued there */
+        lv_display_add_event_cb(disp, drm_dmabuf_set_active_buf, LV_EVENT_REFR_START, drm_dev);
+    }
+    else {
+        /* The DRM driver has no hardware rotation, and direct-mapped rendering can't be rotated
+         * after the fact, so render into a plain CPU buffer and rotate the whole frame into a
+         * physical dumb buffer in drm_flush(). lv_display_set_buffers() must be sized/strided
+         * using the *original* (unrotated) resolution - LVGL internally reshapes the buffer's
+         * header to the logical (rotated) width/stride each frame since the two have the same
+         * total pixel count, just arranged differently. */
+        lv_color_format_t cf = lv_display_get_color_format(disp);
+        uint32_t stride = lv_draw_buf_width_to_stride(hor_res, cf);
+        size_t buf_size = (size_t)stride * ver_res;
+
+        drm_dev->lvgl_buf = lv_malloc(buf_size);
+        LV_ASSERT_MALLOC(drm_dev->lvgl_buf);
+        if (drm_dev->lvgl_buf == NULL) {
+            return LV_RESULT_INVALID;
+        }
+
+        lv_display_set_buffers(disp, drm_dev->lvgl_buf, NULL, buf_size, LV_DISPLAY_RENDER_MODE_FULL);
+    }
+
+    if (width) {
         lv_display_set_dpi(disp, DIV_ROUND_UP(hor_res * 25400, width * 1000));
     }
 
@@ -1067,11 +1095,28 @@ static void drm_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_
 {
     if(!lv_display_flush_is_last(disp)) return;
 
-    LV_UNUSED(area);
-    LV_UNUSED(px_map);
     drm_dev_t * drm_dev = lv_display_get_driver_data(disp);
 
-    LV_ASSERT(drm_dev->act_buf != NULL);
+    if(drm_dev->rotation == LV_DISPLAY_ROTATION_0) {
+        LV_UNUSED(area);
+        LV_UNUSED(px_map);
+        LV_ASSERT(drm_dev->act_buf != NULL);
+    }
+    else {
+        /* Rotate the fully rendered logical-resolution frame into whichever physical buffer
+         * isn't currently on screen, then flip to it. */
+        lv_color_format_t cf = lv_display_get_color_format(disp);
+        int32_t src_w = lv_display_get_horizontal_resolution(disp);
+        int32_t src_h = lv_display_get_vertical_resolution(disp);
+        uint32_t src_stride = lv_display_get_buf_active(disp)->header.stride;
+
+        drm_buffer_t * dest_buf = &drm_dev->drm_bufs[drm_dev->next_buf_idx];
+        drm_dev->next_buf_idx = (drm_dev->next_buf_idx + 1) % BUFFER_CNT;
+
+        lv_draw_rotate(px_map, dest_buf->map, src_w, src_h, src_stride, dest_buf->pitch,
+                       drm_dev->rotation, cf);
+        drm_dev->act_buf = dest_buf;
+    }
 
     if(drm_dmabuf_set_plane(drm_dev, drm_dev->act_buf)) {
         LV_LOG_ERROR("Flush fail");
@@ -1105,6 +1150,12 @@ static void drm_del_event_cb(lv_event_t * e)
     if(drm_dev->req) {
         drmModeAtomicFree(drm_dev->req);
         drm_dev->req = NULL;
+    }
+
+    /* Free internal rotation buffer if allocated */
+    if(drm_dev->lvgl_buf) {
+        lv_free(drm_dev->lvgl_buf);
+        drm_dev->lvgl_buf = NULL;
     }
 
 #if LV_USE_LINUX_DRM_GBM_BUFFERS
