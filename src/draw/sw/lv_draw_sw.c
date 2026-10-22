@@ -262,6 +262,40 @@ static int32_t evaluate(lv_draw_unit_t * draw_unit, lv_draw_task_t * task)
     return 0;
 }
 
+#if LV_USE_OS
+/**
+ * Note: this is a hack!
+ * Local workaround: a task was observed stuck in IN_PROGRESS while every SW render thread was idle,
+ * which blocks all overlapping tasks and makes lv_refr spin forever.
+ */
+static void recover_orphaned_task(lv_layer_t * layer)
+{
+    static const lv_draw_task_t * orphan_candidate = NULL;
+
+    lv_draw_task_t * t = layer->draw_task_head;
+    while(t) {
+        if(t->state == LV_DRAW_TASK_STATE_IN_PROGRESS && t->preferred_draw_unit_id == DRAW_UNIT_ID_SW) break;
+        t = t->next;
+    }
+
+    if(t == NULL) {
+        orphan_candidate = NULL;
+        return;
+    }
+
+    if(t != orphan_candidate) {
+        orphan_candidate = t;
+        return;
+    }
+
+    LV_LOG_ERROR("Orphaned IN_PROGRESS draw task %p (type %d, area %d,%d %d,%d) with idle render threads, requeuing",
+                    (void *)t, (int)t->type, (int)t->area.x1, (int)t->area.y1, (int)t->area.x2, (int)t->area.y2);
+    t->state = LV_DRAW_TASK_STATE_WAITING;
+    orphan_candidate = NULL;
+
+}
+#endif
+
 static int32_t dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
 {
     LV_PROFILER_DRAW_BEGIN;
@@ -283,6 +317,8 @@ static int32_t dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
             break;
         }
     }
+
+    if(all_idle) recover_orphaned_task(layer);
 
     lv_draw_task_t * t = NULL;
     for(i = 0; i < LV_DRAW_SW_DRAW_UNIT_CNT; i++) {
